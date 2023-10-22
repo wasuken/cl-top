@@ -1,48 +1,23 @@
+(in-package :cl-user)
 (defpackage cl-top
-  (:use :cl :cl-ppcre)
-  (:export :main-loop))
+  (:use #:cl #:cl-ppcre)
+  (:import-from #:cl-top.util
+		#:round-to-digits
+		#:slurp
+		#:split
+		#:remove-not-char
+		#:kv-format-parse
+		#:proc-intern
+		#:trim-pid-from-path
+		#:global-stat-format-parse
+		#:safe-zero
+		#:now-datetime-format-string)
+  (:export #:main-loop))
 (in-package :cl-top)
-
-;; blah blah blah.
 
 ;; (ql:quickload 'cl-ppcre)
 
-(defun slurp (filepath)
-  (with-open-file (out filepath :direction :input)
-    (format nil "~{~A~%~}" (loop for l = (read-line out nil nil) while l collect l))
-    )
-  )
-
-(defun split (s sep)
-  (let ((result '())
-	(readed-s ""))
-    (loop for c across s
-	  do (cond ((eq sep c)
-		    (setf result (cons readed-s result))
-		    (setf readed-s ""))
-		   (t
-		    (setf readed-s (concatenate 'string readed-s (format nil "~a" c))))))
-    (when (> (length readed-s) 0)
-      (setf result (cons readed-s result))
-      (setf readed-s ""))
-    (reverse result)))
-
-
-(defun kv-format-parse (s)
-  (let* ((kv (split s #\:))
-	 (key (car kv))
-	 (value (format nil "~{~A ~}" (mapcar #'(lambda (x) (string-trim "	" x)) (cdr kv)))))
-    (values key value)
-    )
-  )
-
-(defun proc-intern (pid key)
-  (intern (format nil "~A/~A" pid (string-downcase key)))
-  )
-
-(defun trim-pid-from-path (path)
-  (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" path))
-  )
+(defparameter +page-size+ 4096)
 
 (defun set-table-from-command (tbl dirpath)
   (let ((content (slurp (format nil "~Acmdline" dirpath)))
@@ -89,11 +64,15 @@
 	 (pid (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" dirpath)))
 	 (vals (split (car (split content #\Newline)) #\Space)))
     (setf (gethash (proc-intern pid "s") tbl) (nth 2 vals))
+    (setf (gethash (proc-intern pid "utime") tbl) (nth 13 vals))
+    (setf (gethash (proc-intern pid "stime") tbl) (nth 14 vals))
     (setf (gethash (proc-intern pid "pr") tbl) (nth 17 vals))
     (setf (gethash (proc-intern pid "ni") tbl) (nth 18 vals))
     tbl
     )
   )
+
+
 
 (defun set-from-mem (tbl)
   (let* ((content (slurp "/proc/meminfo"))
@@ -102,10 +81,31 @@
     (loop for l in content-lines
 	  do (multiple-value-bind (key value)
 		 (kv-format-parse l)
+	       (let ((s (string-trim " " value)))
+		 (when (and (> (length key) 0) (> (length s) 3))
+		   (setf (gethash (intern key) tbl)
+			 (subseq (string-trim " " s) 0 (- (length s) 3)))
+		   )
+		 )
+	       )
+	  )
+    tbl
+    )
+  )
+
+
+(defun set-from-stat (tbl)
+  (let* ((content (slurp "/proc/stat"))
+	 (content-lines (split content #\Newline))
+	 (kv '()))
+    (loop for l in content-lines
+	  do (multiple-value-bind (key value)
+		 (global-stat-format-parse l)
 	       (when (> (length key) 0)
 		 (setf (gethash (intern key) tbl) value))
 	       )
 	  )
+    tbl
     )
   )
 
@@ -120,6 +120,7 @@
 		 (setf (gethash (intern key) tbl) value))
 	       )
 	  )
+    tbl
     )
   )
 
@@ -136,8 +137,7 @@
 	(tbl (make-hash-table))
 	(pid-list (mapcar #'(lambda (p) (trim-pid-from-path (namestring p)))
 			  (list-proc-path))))
-    (set-from-cpu tbl)
-    (set-from-mem tbl)
+    (setf tbl (set-from-stat (set-from-cpu (set-from-mem tbl))))
     (loop for p in (remove-if
 		    #'(lambda (p)
 			(<= (length p) 0))
@@ -157,53 +157,150 @@
   )
 
 (defun print-proc-table-header (tbl pid-list)
-  (format t "none~%")
-  )
-
-(defparameter +line-print-fmt+ "~8A~8A~8A~8A~8A~8A~8A~8A~8A~8A~8A~8A~%")
-
-(defun print-proc-table-body-line (tbl pid)
-  (let ((cmd (gethash (proc-intern pid "command") tbl)))
+  ;; line 1.
+  ;;; uptime
+  (let ((nowdt (now-datetime-format-string))
+	(uptime (round (/ (read-from-string
+			   (car (split (string-trim '(#\Newline)
+						    (slurp "/proc/uptime"))
+				       #\Space)))
+			  60)))
+	(loadavgs (mapcar #'read-from-string
+			   (subseq (split (string-trim '(#\Newline)
+						       (slurp "/proc/loadavg"))
+					  #\Space)
+				   0 3)
+			   ))
+	(proc-status-list (mapcar #'(lambda (ppid)
+				      (let ((v (gethash (intern (format nil "~A/s" ppid)) tbl)))
+					(cond ((string= "R" v)
+					       0)
+					      ((string= "S" v)
+					       1)
+					      ((string= "T" v)
+					       2)
+					      ((string= "Z" v)
+					       3)
+					      )
+					)
+				      )
+				  pid-list))
+	pe)
     (format t
-	    +line-print-fmt+
-	    pid
-	    (string-trim '(#\Space #\Newline #\Tab)
-			 (car (split (gethash (proc-intern pid "uid") tbl "?") #\Tab)))
-	    (string-trim '(#\Space #\Newline #\Tab)  (gethash (proc-intern pid "pr") tbl "?"))
-	    (string-trim '(#\Space #\Newline #\Tab)  (gethash (proc-intern pid "ni") tbl "?"))
-	    (string-trim '(#\Space #\Newline #\Tab)  (gethash (proc-intern pid "virt") tbl "?"))
-	    (string-trim '(#\Space #\Newline #\Tab)  (gethash (proc-intern pid "res") tbl "?"))
-	    (string-trim '(#\Space #\Newline #\Tab)  (gethash (proc-intern pid "shr") tbl "?"))
-	    (string-trim '(#\Space #\Newline #\Tab)  (gethash (proc-intern pid "s") tbl "?"))
-	    "none"
-	    "none"
-	    "none"
-	    "none"
-	    ;;(if (> (length cmd) 10)
-	    ;;	(subseq cmd 0 10))
-	    ;;
+	    "top - ~A up ~A min,  ~A user,  load average: ~A, ~A, ~A~%"
+	    nowdt uptime 1 (nth 0 loadavgs) (nth 1 loadavgs) (nth 2 loadavgs))
+    (format t
+	    "Tasks: ~3,,@A total,   ~3,,@A running, ~3,,@A sleeping,   ~3,,@A stopped,   ~3,,@A zombie~%"
+	    (length pid-list)
+	    (count 0 proc-status-list)
+	    (count 1 proc-status-list)
+	    (count 2 proc-status-list)
+	    (count 3 proc-status-list))
+    ;;(format t "%Cpu(s):  ~A us,  ~A sy,  ~A ni, ~A id,  ~A wa,  ~A hi,  ~A si,  ~A st~%")
+    (format t
+	    "MiB Mem :    ~8,,A total,   ~8,,A free,   ~8,,A used,   ~8,,A buff/cache~%"
+	    (gethash (intern "memtotal") tbl)
+	    (gethash (intern "memfree") tbl)
+	    ;; used
+	    (- (parse-integer (gethash (intern "memtotal") tbl))
+	       (parse-integer (gethash (intern "memfree") tbl))
+	       (parse-integer (gethash (intern "buffers") tbl))
+	       (parse-integer (gethash (intern "cached") tbl)))
+	    ;; buf/cache
+	    (+ (parse-integer (gethash (intern "buffers") tbl))
+	       (parse-integer (gethash (intern "cached") tbl)))
+	    )
+    (format t "MiB Swap:    ~8,,A total,   ~8,,A free,   ~8,,A used.   ~8,,A avail Mem~%"
+	    (gethash (intern "swaptotal") tbl)
+	    (gethash (intern "swapfree") tbl)
+	    (- (parse-integer (gethash (intern "swaptotal") tbl))
+	       (parse-integer (gethash (intern "swapfree") tbl))
+	       )
+	    (gethash (intern "memavailable") tbl)
 	    )
     )
+  )
+
+(defun proc-table-body-line (tbl pid)
+  (let ((cmd (car (reverse (split (string-trim '(#\Newline) (gethash (proc-intern pid "command") tbl)) #\/)))))
+    (list
+     pid
+     (remove-not-char (car (split (gethash (proc-intern pid "uid") tbl "?")
+				  #\Tab)
+			   )
+		      )
+     (remove-not-char (gethash (proc-intern pid "pr") tbl))
+     (remove-not-char (gethash (proc-intern pid "ni") tbl))
+     (round (/ (* (parse-integer
+		   (remove-not-char (gethash (proc-intern pid "virt") tbl)))
+		  +page-size+)
+	       (float 1024)))
+     (round (/ (* (parse-integer
+		   (remove-not-char (gethash (proc-intern pid "res") tbl)))
+		  +page-size+)
+	       (float 1024)))
+     (round (/ (* (parse-integer
+		   (remove-not-char (gethash (proc-intern pid "shr") tbl)))
+		  +page-size+)
+	       (float 1024)))
+     (remove-not-char (gethash (proc-intern pid "s") tbl))
+     (safe-zero (parse-integer (gethash (proc-intern pid "utime") tbl))
+		(parse-integer (gethash (proc-intern pid "stime") tbl))
+		utime
+		stime
+		(round-to-digits
+		 (* (/ (+ utime stime)
+		       (* (parse-integer (gethash (intern "cpucores") tbl))
+			  (gethash (intern "cpu") tbl)))
+		    100.0)
+		 4)
+		0)
+     (safe-zero (round (/ (* (parse-integer
+			      (remove-not-char (gethash (proc-intern pid "res") tbl)))
+			     +page-size+)
+			  (float 1024)))
+		(parse-integer (gethash (intern "memtotal") tbl))
+		res
+		mem-total
+		(round-to-digits (float (* (/ res mem-total) 100)) 1)
+		0)
+     (safe-zero (parse-integer (gethash (proc-intern pid "utime") tbl))
+		(parse-integer (gethash (proc-intern pid "stime") tbl))
+		utime
+		stime
+		(round-to-digits (float (/ (+ utime stime) 100)) 4)
+		0)
+     (cond ((> (length cmd) 30)
+	    (subseq cmd 0 30))
+	   ((null cmd) "")
+	   (t cmd))
+     ))
 
   )
+
 
 (defun print-proc-table-body (tbl pid-list)
   (format t
-	  +line-print-fmt+
-	  "PID"
-	  "USER"
-	  "PR"
-	  "NI"
-	  "VIRT"
-	  "RES"
-	  "SHR"
-	  "S"
-	  "CPU"
-	  "MEM"
-	  "TIME"
-	  "COMMAND"
+	  "~{~9,,A~}~%"
+	  '("PID"
+	    "USER"
+	    "PR"
+	    "NI"
+	    "VIRT"
+	    "RES"
+	    "SHR"
+	    "S"
+	    "CPU"
+	    "MEM"
+	    "TIME"
+	    "COMMAND")
 	  )
-  (loop for pid in pid-list do (print-proc-table-body-line tbl pid))
+  (loop for x in (take 20
+		       (sort
+			(mapcar #'(lambda (pid) (proc-table-body-line tbl pid)) pid-list)
+			#'>
+			:key #'(lambda (x) (nth 9 x))))
+	do (format t "~{~9,,A~}~%" x))
   )
 
 (defun take (n lst)
@@ -214,9 +311,9 @@
 (defun print-proc-table ()
   (multiple-value-bind (tbl pid-list) (generate-table)
     (let ((top-pid-list (take 20 pid-list)))
-      (print-proc-table-header tbl top-pid-list)
-      (format t "=====================================~%")
-      (print-proc-table-body tbl top-pid-list)
+      (print-proc-table-header tbl pid-list)
+      (format t "===============================================================================================================~%")
+      (print-proc-table-body tbl pid-list)
       )
 
     )
