@@ -11,13 +11,17 @@
 		#:trim-pid-from-path
 		#:global-stat-format-parse
 		#:safe-zero
-		#:now-datetime-format-string)
+		#:now-datetime-format-string
+		#:mformat
+		)
   (:export #:main-loop))
 (in-package :cl-top)
 
 ;; (ql:quickload 'cl-ppcre)
 
 (defparameter +page-size+ 4096)
+
+(defparameter *cpu-info-prev* '())
 
 (defun set-table-from-command (tbl dirpath)
   (let ((content (slurp (format nil "~Acmdline" dirpath)))
@@ -40,7 +44,7 @@
 	       (setf (gethash (proc-intern pid key) tbl) value))
 	  )
     tbl
-   )
+    )
   )
 
 
@@ -159,33 +163,36 @@
 (defun print-proc-table-header (tbl pid-list)
   ;; line 1.
   ;;; uptime
-  (let ((nowdt (now-datetime-format-string))
-	(uptime (round (/ (read-from-string
-			   (car (split (string-trim '(#\Newline)
-						    (slurp "/proc/uptime"))
-				       #\Space)))
-			  60)))
-	(loadavgs (mapcar #'read-from-string
+  (let* ((nowdt (now-datetime-format-string))
+	 (uptime (round (/ (read-from-string
+			    (car (split (string-trim '(#\Newline)
+						     (slurp "/proc/uptime"))
+					#\Space)))
+			   60)))
+	 (loadavgs (mapcar #'read-from-string
 			   (subseq (split (string-trim '(#\Newline)
 						       (slurp "/proc/loadavg"))
 					  #\Space)
 				   0 3)
 			   ))
-	(proc-status-list (mapcar #'(lambda (ppid)
-				      (let ((v (gethash (intern (format nil "~A/s" ppid)) tbl)))
-					(cond ((string= "R" v)
-					       0)
-					      ((string= "S" v)
-					       1)
-					      ((string= "T" v)
-					       2)
-					      ((string= "Z" v)
-					       3)
-					      )
-					)
-				      )
-				  pid-list))
-	pe)
+	 (cpu-info (mapcar #'parse-integer
+			   (cddr (split (car (split (slurp "/proc/stat") #\Newline)) #\Space))))
+	 (cpu-info-now (mapcar #'- cpu-info *cpu-info-prev*))
+	 (proc-status-list (mapcar #'(lambda (ppid)
+				       (let ((v (gethash (intern (format nil "~A/s" ppid)) tbl)))
+					 (cond ((string= "R" v)
+						0)
+					       ((string= "S" v)
+						1)
+					       ((string= "T" v)
+						2)
+					       ((string= "Z" v)
+						3)
+					       )
+					 )
+				       )
+				   pid-list))
+	 pe)
     (format t
 	    "top - ~A up ~A min,  ~A user,  load average: ~A, ~A, ~A~%"
 	    nowdt uptime 1 (nth 0 loadavgs) (nth 1 loadavgs) (nth 2 loadavgs))
@@ -196,7 +203,26 @@
 	    (count 1 proc-status-list)
 	    (count 2 proc-status-list)
 	    (count 3 proc-status-list))
-    ;;(format t "%Cpu(s):  ~A us,  ~A sy,  ~A ni, ~A id,  ~A wa,  ~A hi,  ~A si,  ~A st~%")
+    (progn
+      (if (null *cpu-info-prev*)
+	  (format t
+		  "%Cpu(s):  ~A us,  ~A sy,  ~A ni, ~A id,  ~A wa,  ~A hi,  ~A si,  ~A st~%"
+		  0 0 0 0 0 0 0 0)
+	  (format
+	   t
+	   "%Cpu(s):  ~A us,  ~A sy,  ~A ni, ~A id,  ~A wa,  ~A hi,  ~A si,  ~A st~%"
+	   (nth 0 cpu-info-now)
+	   (nth 1 cpu-info-now)
+	   (nth 2 cpu-info-now)
+	   (nth 3 cpu-info-now)
+	   (nth 4 cpu-info-now)
+	   (nth 5 cpu-info-now)
+	   (nth 6 cpu-info-now)
+	   (nth 7 cpu-info-now)
+	   )
+	  )
+      (setf *cpu-info-prev* cpu-info)
+      )
     (format t
 	    "MiB Mem :    ~8,,A total,   ~8,,A free,   ~8,,A used,   ~8,,A buff/cache~%"
 	    (gethash (intern "memtotal") tbl)
@@ -281,7 +307,8 @@
 
 (defun print-proc-table-body (tbl pid-list)
   (format t
-	  "~{~9,,A~}~%"
+	  "~a[30;47m~%~{~9,,A~}~a[0m~%"
+	  #\ESC
 	  '("PID"
 	    "USER"
 	    "PR"
@@ -294,6 +321,7 @@
 	    "MEM"
 	    "TIME"
 	    "COMMAND")
+	  #\ESC
 	  )
   (loop for x in (take 20
 		       (sort
@@ -312,7 +340,7 @@
   (multiple-value-bind (tbl pid-list) (generate-table)
     (let ((top-pid-list (take 20 pid-list)))
       (print-proc-table-header tbl pid-list)
-      (format t "===============================================================================================================~%")
+      ;; (format t "===============================================================================================================~%")
       (print-proc-table-body tbl pid-list)
       )
 

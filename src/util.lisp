@@ -10,7 +10,10 @@
 	   #:trim-pid-from-path
 	   #:global-stat-format-parse
 	   #:safe-zero
-	   #:now-datetime-format-string))
+	   #:now-datetime-format-string
+	   #:mformat
+	   )
+  )
 (in-package :cl-top.util)
 
 ;; (ql:quickload 'cl-ppcre)
@@ -84,3 +87,5 @@
 	      (format nil "~4,'0D-~2,'0D-~2,'0D ~2,'0D:~2,'0D:~2,'0D"
 		      year month date hour minute second))))
 )
+
+(defparameter *cpu-info-prev* '())
