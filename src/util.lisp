@@ -12,6 +12,8 @@
 	   #:safe-zero
 	   #:now-datetime-format-string
 	   #:mformat
+	   #:take
+	   #:->
 	   )
   )
 (in-package :cl-top.util)
@@ -42,7 +44,6 @@
       (setf readed-s ""))
     (reverse result)))
 
-
 (defun remove-not-char (s)
   (cl-ppcre:regex-replace-all "\\W" s ""))
 
@@ -64,20 +65,13 @@
   (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" path))
   )
 
-
 (defun global-stat-format-parse (s)
-  (let ((ary (split s #\ )))
+  (let* ((ary (split s #\ ))
+	 (iary (mapcar #'parse-integer
+		       (remove-if #'(lambda (x) (< (length x) 1)) (cdr ary)))))
     (values (car ary)
-	    (apply #'+ (mapcar #'parse-integer
-			       (remove-if #'(lambda (x) (< (length x) 1)) (cdr ary)))))))
-(defmacro safe-zero (a b a-bind b-bind body default)
-  `(let ((,a-bind ,a)
-	 (,b-bind ,b))
-     (if (or (zerop ,a-bind) (zerop ,b-bind))
-	 ,default
-	 ,body)
-     )
-  )
+	    (apply #'+ iary)
+	    iary)))
 
 (defun now-datetime-format-string ()
   (let ((current-time (get-universal-time)))
@@ -88,4 +82,26 @@
 		      year month date hour minute second))))
 )
 
-(defparameter *cpu-info-prev* '())
+(defmacro safe-zero (a b a-bind b-bind body default)
+  `(let ((,a-bind ,a)
+	 (,b-bind ,b))
+     (if (or (zerop ,a-bind) (zerop ,b-bind))
+	 ,default
+	 ,body)
+     )
+  )
+
+(defun take (n lst)
+  (if (> n 0)
+      (cons (car lst) (take (1- n) (cdr lst)))))
+
+(defmacro -> (v &rest body)
+  (let ((rst '()))
+    (loop for x in body
+	  do (setf rst `(,x ,(if (null rst)
+				 v
+				 rst)
+			    )
+		   ))
+    rst)
+  )

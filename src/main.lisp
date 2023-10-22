@@ -13,6 +13,8 @@
 		#:safe-zero
 		#:now-datetime-format-string
 		#:mformat
+		#:take
+		#:->
 		)
   (:export #:main-loop))
 (in-package :cl-top)
@@ -103,10 +105,12 @@
 	 (content-lines (split content #\Newline))
 	 (kv '()))
     (loop for l in content-lines
-	  do (multiple-value-bind (key value)
+	  do (multiple-value-bind (key value ivalue)
 		 (global-stat-format-parse l)
 	       (when (> (length key) 0)
-		 (setf (gethash (intern key) tbl) value))
+		 (setf (gethash (intern key) tbl) value)
+		 (setf (gethash (intern (format nil "~As" key)) tbl) ivalue)
+		 )
 	       )
 	  )
     tbl
@@ -141,7 +145,15 @@
 	(tbl (make-hash-table))
 	(pid-list (mapcar #'(lambda (p) (trim-pid-from-path (namestring p)))
 			  (list-proc-path))))
-    (setf tbl (set-from-stat (set-from-cpu (set-from-mem tbl))))
+    ;; (set-from-stat (set-from-cpu (set-from-mem (set-from-uptime (set-from-loadavgs tbl)))))
+    (setf tbl
+	  (-> tbl
+	      set-from-stat
+	      set-from-cpu
+	      set-from-mem
+	      set-from-uptime
+	      set-from-loadavgs)
+	  )
     (loop for p in (remove-if
 		    #'(lambda (p)
 			(<= (length p) 0))
@@ -160,23 +172,31 @@
     )
   )
 
+
+(defun set-from-uptime (tbl)
+  (setf (gethash (intern "uptime") tbl)
+	(car (split (string-trim '(#\Newline)
+				 (slurp "/proc/uptime"))
+		    #\Space)))
+  tbl
+  )
+
+(defun set-from-loadavgs (tbl)
+  (setf (gethash (intern "loadavgs") tbl)
+	(subseq (split (string-trim '(#\Newline)
+				    (slurp "/proc/loadavg"))
+		       #\Space)
+		0 3))
+  tbl
+  )
+
 (defun print-proc-table-header (tbl pid-list)
   ;; line 1.
   ;;; uptime
   (let* ((nowdt (now-datetime-format-string))
-	 (uptime (round (/ (read-from-string
-			    (car (split (string-trim '(#\Newline)
-						     (slurp "/proc/uptime"))
-					#\Space)))
-			   60)))
-	 (loadavgs (mapcar #'read-from-string
-			   (subseq (split (string-trim '(#\Newline)
-						       (slurp "/proc/loadavg"))
-					  #\Space)
-				   0 3)
-			   ))
-	 (cpu-info (mapcar #'parse-integer
-			   (cddr (split (car (split (slurp "/proc/stat") #\Newline)) #\Space))))
+	 (uptime (round (/ (read-from-string (gethash (intern "uptime") tbl)) 60)))
+	 (loadavgs (mapcar #'read-from-string (gethash (intern "loadavgs") tbl)))
+	 (cpu-info (gethash (intern "cpus") tbl))
 	 (cpu-info-now (mapcar #'- cpu-info *cpu-info-prev*))
 	 (proc-status-list (mapcar #'(lambda (ppid)
 				       (let ((v (gethash (intern (format nil "~A/s" ppid)) tbl)))
@@ -330,10 +350,6 @@
 			:key #'(lambda (x) (nth 9 x))))
 	do (format t "~{~9,,A~}~%" x))
   )
-
-(defun take (n lst)
-  (if (> n 0)
-      (cons (car lst) (take (1- n) (cdr lst)))))
 
 ;; print top all
 (defun print-proc-table ()
