@@ -35,11 +35,7 @@
 
 (defun set-table-from-status (tbl dirpath)
   (let ((content-lines (split (slurp (format nil "~Astatus" dirpath)) #\Newline))
-	(kv '())
-	(key "")
-	(value "")
-	(pid (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" dirpath)))
-	)
+	(pid (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" dirpath))))
     (loop for l in content-lines
 	  do (multiple-value-bind (key value)
 		 (kv-format-parse l)
@@ -49,36 +45,37 @@
     )
   )
 
-
-(defun set-table-from-statm (tbl dirpath)
-  (let* ((statm-path (format nil "~Astatm" dirpath))
-	 (content (slurp statm-path))
-	 (pid (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" dirpath)))
-	 (vals (split (car (split content #\Newline)) #\Space)))
-    (setf (gethash (proc-intern pid "virt") tbl) (nth 0 vals))
-    (setf (gethash (proc-intern pid "res") tbl) (nth 1 vals))
-    (setf (gethash (proc-intern pid "shr") tbl) (nth 2 vals))
-    (setf (gethash (proc-intern pid "mem") tbl) (nth 2 vals))
-    ;; mem 0 1?
-    tbl
+(defmacro gen-set-table-from-x (tbl dirpath basename &rest params)
+  (let* ((var-path (gensym))
+	 (var-content (gensym))
+	 (var-pid (gensym))
+	 (var-vals (gensym))
+	 (pairs (loop until (null params) collect `(,(pop params) . ,(pop params)))))
+    `(let* ((,var-path (format nil ,(format nil "~~A~A" basename) ,dirpath))
+	    (,var-content (slurp ,var-path))
+	    (,var-pid (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" ,dirpath)))
+	    (,var-vals (split (car (split ,var-content #\Newline)) #\Space)))
+       ,@(mapcar #'(lambda (pair)
+		     `(setf (gethash (proc-intern ,var-pid ,(car pair)) tbl)
+			    (nth ,(cdr pair) ,var-vals))
+		     )
+		 pairs)
+       ,tbl
+       )
     )
   )
 
 (defun set-table-from-stat (tbl dirpath)
-  (let* ((stat-path (format nil "~Astat" dirpath))
-	 (content (slurp stat-path))
-	 (pid (parse-integer (cl-ppcre:scan-to-strings "[0-9]+" dirpath)))
-	 (vals (split (car (split content #\Newline)) #\Space)))
-    (setf (gethash (proc-intern pid "s") tbl) (nth 2 vals))
-    (setf (gethash (proc-intern pid "utime") tbl) (nth 13 vals))
-    (setf (gethash (proc-intern pid "stime") tbl) (nth 14 vals))
-    (setf (gethash (proc-intern pid "pr") tbl) (nth 17 vals))
-    (setf (gethash (proc-intern pid "ni") tbl) (nth 18 vals))
-    tbl
-    )
+  (gen-set-table-from-x tbl dirpath "statm" "virt" 0 "res" 1 "shr" 2 "mem" 2))
+
+(defun set-table-from-statm (tbl dirpath)
+  (gen-set-table-from-x tbl dirpath "stat"
+			"s"  2
+			"utime"  13
+			"stime"  14
+			"pr" 17
+			"ni"18)
   )
-
-
 
 (defun set-from-mem (tbl)
   (let* ((content (slurp "/proc/meminfo"))
@@ -99,38 +96,27 @@
     )
   )
 
-
-(defun set-from-stat (tbl)
-  (let* ((content (slurp "/proc/stat"))
-	 (content-lines (split content #\Newline))
-	 (kv '()))
-    (loop for l in content-lines
+(defmacro set-from-x (tbl filepath v-intp)
+  `(progn
+    (loop for l in (split (slurp ,filepath) #\Newline)
 	  do (multiple-value-bind (key value ivalue)
-		 (global-stat-format-parse l)
+		 ,(if v-intp
+		      `(kv-format-parse l)
+		      `(global-stat-format-parse l))
 	       (when (> (length key) 0)
-		 (setf (gethash (intern key) tbl) value)
-		 (setf (gethash (intern (format nil "~As" key)) tbl) ivalue)
+		 (setf (gethash (intern key) ,tbl) value)
+		 ,(if v-intp
+		      `(setf (gethash (intern (format nil "~As" key)) ,tbl) ivalue))
 		 )
 	       )
 	  )
-    tbl
-    )
+    ,tbl)
   )
 
+(defun set-from-stat (tbl)
+  (set-from-x tbl "/proc/stat" nil))
 (defun set-from-cpu (tbl)
-  (let* ((content (slurp "/proc/cpuinfo"))
-	 (content-lines (split content #\Newline))
-	 (kv '()))
-    (loop for l in content-lines
-	  do (multiple-value-bind (key value)
-		 (kv-format-parse l)
-	       (when (> (length key) 0)
-		 (setf (gethash (intern key) tbl) value))
-	       )
-	  )
-    tbl
-    )
-  )
+  (set-from-x tbl "/proc/cpuinfo" t))
 
 (defun list-proc-path ()
   (remove-if-not #'(lambda (x)
@@ -356,7 +342,6 @@
   (multiple-value-bind (tbl pid-list) (generate-table)
     (let ((top-pid-list (take 20 pid-list)))
       (print-proc-table-header tbl pid-list)
-      ;; (format t "===============================================================================================================~%")
       (print-proc-table-body tbl pid-list)
       )
 
